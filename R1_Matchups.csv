@@ -1,0 +1,41 @@
+TEAM.x,TEAM.y,Team_A_ID,Team_B_ID,Seed_A,Seed_B,Pred
+Gonzaga,Georgia St.,1211,1209,1,16,0.956
+Kansas,Texas A&M Corpus Chris,1242,1394,1,16,0.95
+Arizona,Wright St.,1112,1460,1,16,0.927
+Duke,Cal St. Fullerton,1181,1168,2,15,0.919
+Kansas,Texas Southern,1242,1411,1,16,0.917
+Baylor,Norfolk St.,1124,1313,1,16,0.914
+Texas Tech,Montana St.,1403,1286,3,14,0.913
+Arizona,Bryant,1112,1136,1,16,0.911
+Tennessee,Longwood,1397,1255,3,14,0.902
+UCLA,Akron,1417,1103,4,13,0.891
+Villanova,Delaware,1437,1174,2,15,0.878
+Purdue,Yale,1345,1463,3,14,0.878
+Kentucky,Saint Peter's,1246,1389,2,15,0.848
+Auburn,Jacksonville St.,1120,1240,2,15,0.846
+Iowa,Richmond,1234,1350,5,12,0.815
+Wisconsin,Colgate,1458,1159,3,14,0.768
+Illinois,Chattanooga,1228,1151,4,13,0.757
+Houston,UAB,1222,1412,5,12,0.749
+LSU,Iowa St.,1261,1235,6,11,0.713
+San Diego St.,Creighton,1361,1166,8,9,0.712
+Saint Mary's,Indiana,1388,1231,5,12,0.677
+Connecticut,New Mexico St.,1163,1308,5,12,0.666
+San Francisco,Murray St.,1362,1293,10,7,0.649
+Texas Southern,Texas A&M Corpus Chris,1411,1394,16,16,0.635
+Memphis,Boise St.,1272,1129,9,8,0.634
+Saint Mary's,Wyoming,1388,1461,5,12,0.63
+Alabama,Rutgers,1104,1353,6,11,0.626
+TCU,Seton Hall,1395,1371,9,8,0.604
+Bryant,Wright St.,1136,1460,16,16,0.597
+North Carolina,Marquette,1314,1266,8,9,0.594
+Providence,South Dakota St.,1344,1355,4,13,0.588
+Michigan,Colorado St.,1276,1161,11,6,0.574
+Ohio St.,Loyola Chicago,1326,1260,7,10,0.569
+Indiana,Wyoming,1231,1461,12,12,0.566
+Arkansas,Vermont,1116,1436,4,13,0.563
+Notre Dame,Rutgers,1323,1353,11,11,0.563
+Alabama,Notre Dame,1104,1323,6,11,0.555
+Virginia Tech,Texas,1439,1400,11,6,0.543
+Miami FL,USC,1274,1425,10,7,0.53
+Michigan St.,Davidson,1277,1172,7,10,0.514

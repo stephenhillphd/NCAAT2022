@@ -1,0 +1,70 @@
+### Tables
+
+```{r, include = FALSE}
+library(tidyverse) 
+library(gt)
+library(paletteer)
+library(ncaahoopR)
+```
+
+```{r}
+r_1 = read_csv("R1_Matchups.csv")
+```
+
+```{r}
+#read-in colors file from ncaahoopR package, but with added Kaggle IDs (manually added in Excel)
+ncaa_colors = read_csv("ncaa_colors.csv")
+```
+
+```{r}
+r_1 = r_1 %>% inner_join(ncaa_colors, by = c("Team_A_ID" = "ID"))
+r_1 = r_1 %>% inner_join(ncaa_colors, by = c("Team_B_ID" = "ID"))
+```
+
+
+```{r}
+head(r_1)
+
+```
+
+```{r}
+r_1 %>% select(logo_url.x, TEAM.x, logo_url.y, TEAM.y, Seed_A, Seed_B, Pred) %>% 
+  gt() %>%
+  cols_align(
+    align = "center"
+  ) %>%
+  cols_align(
+    align = "left",
+    columns = c(TEAM.x, TEAM.y)
+  ) %>%
+  text_transform(
+      locations = cells_body(c(logo_url.x, logo_url.y)),
+      fn = function(x) {
+        web_image(
+          url = x,
+          height = 30
+        )
+      }
+    ) %>%
+  cols_label(
+    TEAM.x = md("**Team A**"),
+    TEAM.y = md("**Team B**"),
+    Seed_A = md("**Seed A**"),
+    Seed_B = md("**Seed B**"),
+    Pred = md("**Team A Win Prob**"),
+    logo_url.x = "",
+    logo_url.y = ""
+  ) %>%
+  tab_header(
+    title = md("**1st/2nd Round Win Probabilities**")
+  )
+
+```
+
+
+
+```{r}
+gtsave(first, filename = "first.png", expand = 10)
+```
+
+

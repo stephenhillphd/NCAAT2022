@@ -1,0 +1,691 @@
+### Kaggle March Madness 2022 Analysis (Part 1)
+
+Analysis of historical NCAA tournament games. The objective is to estimate probabilities for historical games from the 2016, 2017, 2018, 2019, and 2021 NCAAA tournaments.  
+
+#### Libraries
+
+Load the necessary libraries.  
+```{r, include = FALSE}
+library(tidyverse)  
+library(tidymodels)
+library(usemodels)
+library(glmnet)
+library(finetune)
+library(stacks)
+library(GGally)
+library(vip)
+library(SHAPforxgboost)
+#guidance on SHAP here: https://juliasilge.com/blog/board-games/
+```
+
+#### Custom Log Loss Function
+
+```{r}
+LogLossBinary = function(actual, predicted, eps = 1e-15) {
+predicted = pmin(pmax(predicted, eps), 1-eps)
+- (actual * log(predicted) + (1 - actual) * log(1 - predicted)) / 1
+}
+```
+
+#### Data Ingest
+
+Load the team information.  
+```{r, include = FALSE}
+teams = read_csv("MTeams.csv")
+teamspell = read_csv("MTeamSpellings.csv")
+```
+
+Load NCAA tournament results dataset.  
+```{r, include = FALSE}
+tourney = read_csv("MNCAATourneyCompactResults.csv")
+```
+
+Load Massey rankings. Note that the tournament starts on day numbers 134 or 135.  
+```{r, include = FALSE}
+massey = read_csv("MMasseyOrdinals.csv")
+```
+
+Read-in Torvik data  
+```{r, include = FALSE}
+torvik = read_csv("TorvikData_v5.csv")
+```
+
+Read-in Seeding data
+```{r, include = FALSE}
+seeds = read_csv("MNCAATourneySeeds.csv")
+```
+
+#### Data Prep
+
+Here we perform our various data cleaning tasks.  
+
+##### Seed Data Cleaning
+
+```{r}
+seeds = seeds %>% unite("Season_TeamID", c(Season,TeamID), remove = FALSE) %>%
+  filter(Season >= 2016)
+```
+
+```{r}
+seeds$Seed = parse_number(seeds$Seed, na = character())
+```
+
+##### Torvik Data Cleaning 
+
+Matching of team names to IDs in the Torvik data done manually in Excel (see NameMatching_InExcel.csv file for results of the matching).  
+
+```{r}
+torvik = torvik %>% unite("Season_TeamID", c(Season,ID), remove = FALSE)
+```
+
+Rename the Rank (BARTHAG) variable to "TORV" to represent the system name.  
+```{r}
+torvik = torvik %>% rename(TORV = BARTHAG)
+```
+
+```{r}
+head(torvik)
+```
+
+##### Massey and Pomeroy Ratings Cleaning
+
+Using only Torvik BARTHAG and 4 factors data
+
+Filter to only Massey and Pomeroy ratings in Kaggle rankings dataset.    
+```{r}
+# massey_pom = massey %>% filter(SystemName == "MAS" | SystemName == "POM")
+# rm(massey) #remove massey (don't need it anymore)
+```
+
+Filter to years we need.  
+```{r}
+# massey_pom = massey_pom %>% filter(Season == 2016 | Season == 2017 |
+#                                      Season == 2018 | Season == 2019 |
+#                                      Season == 2021)
+```
+
+Filter to the last ranking before the tournament. This corresponds to day number 133 in the datasets. This is noted in the Kaggle data description.    
+```{r}
+# massey_pom = massey_pom %>% filter(RankingDayNum == 133)
+```
+
+Create a Season and Team ID variable for matching  
+```{r}
+# massey_pom = massey_pom %>% unite("Season_TeamID", c(Season,TeamID), remove = FALSE)
+```
+
+Pivot the Massey/Pomeroy data.  
+```{r}
+# massey_pom = massey_pom %>% pivot_wider(id = c(Season_TeamID, TeamID), names_from = SystemName, values_from = OrdinalRank)
+```
+
+##### Tourney Results Dataset Cleaning 
+
+Filter to correct years 
+```{R}
+tourney = tourney %>% filter(Season == 2016 | Season == 2017 |
+                                     Season == 2018 | Season == 2019 |
+                                     Season == 2021 | Season == 2022)
+```
+
+Create a Season and team ID variable for matching.  
+```{r}
+tourney = tourney %>% unite("Season_WTeamID", c(Season,WTeamID), remove = FALSE) %>%
+   unite("Season_LTeamID", c(Season,LTeamID), remove = FALSE)
+```           
+
+Create a Game ID value in the "tourney" data frame.  
+```{r}
+tourney = tourney %>% unite("GameID", c("Season_WTeamID", "Season_LTeamID"), remove = FALSE)
+```
+
+```{r}
+# head(massey_pom)
+head(tourney)
+```
+
+##### Working with Results Data
+
+Conduct joins to add Massey/Pomeroy data
+```{r}
+# results = left_join(tourney, massey_pom, by = c("Season_WTeamID" = "Season_TeamID"))
+# results = left_join(results, massey_pom, by = c("Season_LTeamID" = "Season_TeamID"))
+```
+
+Joins to add Torvik data  
+```{r}
+results = left_join(tourney, torvik, by = c("Season_WTeamID" = "Season_TeamID"))
+results = left_join(results, torvik, by = c("Season_LTeamID" = "Season_TeamID"))
+```
+
+Joins to add Seeds data
+```{R}
+results = left_join(results, seeds, by = c("Season_WTeamID" = "Season_TeamID"))
+results = left_join(results, seeds, by = c("Season_LTeamID" = "Season_TeamID"))
+```
+
+Examine the data (after the joins)
+```{r} 
+head(results)
+```
+At this point in the code, all of the teams that are team "x" in the dataset are the winners. Need to create a response variable indicating which team won. We'll base this off of the team ID. Will ultimately need several columns:
+
+* Did team A win (Yes/No) as a factor?
+* Torkvik BARTHAG
+* Torvik 4 factors
+* Seeds
+
+Use TeamID to help determine who is team A (we'll say the team with the lower numeric TeamID value if team A).  
+```{r}
+results = results %>% mutate(Team_A_ID = pmin(WTeamID,LTeamID)) %>%
+  mutate(Team_B_ID = pmax(WTeamID, LTeamID))
+```
+
+Set-up Massey and Pomeroy ratings for Team A and B 
+```{r}
+# results = results %>% mutate(Massey_A = ifelse(Team_A_ID == WTeamID, MAS.x, MAS.y)) %>%
+#   mutate(Massey_B = ifelse(Team_B_ID == WTeamID, MAS.x, MAS.y)) %>%
+#   mutate(Pomeroy_A = ifelse(Team_A_ID == WTeamID, POM.x, POM.y)) %>%
+#   mutate(Pomeroy_B = ifelse(Team_B_ID == WTeamID, POM.x, POM.y))
+```
+
+Set-up Torvik stats for Team A and B
+```{r}
+results = results %>%
+  #off and def efficiency
+  mutate(ADJOE_A = ifelse(Team_A_ID == WTeamID, ADJOE.x, ADJOE.y)) %>%
+  mutate(ADJOE_B = ifelse(Team_B_ID == WTeamID, ADJOE.x, ADJOE.y)) %>%
+  mutate(ADJDE_A = ifelse(Team_A_ID == WTeamID, ADJDE.x, ADJDE.y)) %>%
+  mutate(ADJDE_B = ifelse(Team_B_ID == WTeamID, ADJDE.x, ADJDE.y)) %>%
+  
+  #four factors
+  #EFG
+  mutate(`EFG%_A` = ifelse(Team_A_ID == WTeamID, `EFG%.x`, `EFG%.y`)) %>%
+  mutate(`EFG%_B` = ifelse(Team_B_ID == WTeamID, `EFG%.x`, `EFG%.y`)) %>%
+  
+  #ORB
+  mutate(ORB_A = ifelse(Team_A_ID == WTeamID, ORB.x, ORB.y)) %>%
+  mutate(ORB_B = ifelse(Team_B_ID == WTeamID, ORB.x, ORB.y)) %>%
+  
+  #TOR
+  mutate(TOR_A = ifelse(Team_A_ID == WTeamID, TOR.x, TOR.y)) %>%
+  mutate(TOR_B = ifelse(Team_B_ID == WTeamID, TOR.x, TOR.y)) %>%
+  
+  #FTR
+  mutate(FTR_A = ifelse(Team_A_ID == WTeamID, FTR.x, FTR.y)) %>%
+  mutate(FTR_B = ifelse(Team_B_ID == WTeamID, FTR.x, FTR.y)) %>%
+  
+  #TORV ratings (BARTHAG)
+  mutate(TORV_A = ifelse(Team_A_ID == WTeamID, TORV.x, TORV.y)) %>%
+  mutate(TORV_B = ifelse(Team_B_ID == WTeamID, TORV.x, TORV.y))
+```
+
+Set-up Seeds for Team A and B
+```{r}
+results = results %>% mutate(Seed_A = ifelse(Team_A_ID == WTeamID, Seed.x, Seed.y)) %>%
+  mutate(Seed_B = ifelse(Team_B_ID == WTeamID, Seed.x, Seed.y)) %>%
+  mutate(Seed_A = as_factor(Seed_A)) %>%
+  mutate(Seed_B = as_factor(Seed_B))
+```
+
+Create difference variables (diff in Massey, Pomeroy, and Torvik rankings and seeds)  
+```{r}
+results = results %>% 
+#   mutate(Massey_Diff = Massey_A - Massey_B) %>%
+#   mutate(Pomeroy_Diff = Pomeroy_A - Pomeroy_B) %>%
+#   mutate(Torv_Diff = TORV_A - TORV_B) %>%
+   mutate(Seed_Diff = as.numeric(Seed_A) - as.numeric(Seed_B)) #%>%
+#   mutate(Off_Diff = ADJOE_A - ADJOE_B) %>%
+#   mutate(Def_Diff = ADJDE_A - ADJDE_B) %>%
+#   mutate(OffDef_Diff = ADJOE_A - ADJDE_B) %>%
+#   mutate(DefOff_Diff = ADJDE_A - ADJOE_B)
+```
+
+Set-up response variable
+```{R}
+results = results %>% mutate(Team_A_Win = ifelse(Team_A_ID == WTeamID, "Yes","No")) %>%
+  mutate(Team_A_Win = as_factor(Team_A_Win)) %>%
+  mutate(Team_A_Win = fct_relevel(Team_A_Win,c("No","Yes")))
+```
+
+Create Kaggle ID in dataset  (Year_LowerTeamID_UpperTeamID)  
+```{R}
+results = results %>% unite("ID", c(Season,Team_A_ID,Team_B_ID), remove = FALSE)
+```
+
+Double-check results  
+```{r}
+head(results)
+```
+
+#### Some Visuals
+
+```{R}
+#results %>% select(Massey_A, Massey_Diff,Pomeroy_A,Pomeroy_Diff, 
+#    TORV_A,Torv_Diff,Seed_A, Seed_Diff,ADJOE_A,ADJOE_B,ADJDE_A,ADJDE_B,
+#      Off_Diff,Def_Diff,OffDef_Diff,DefOff_Diff) %>% ggcorr(hjust = 1, layout.exp = 2.5)
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = Massey_A)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = Pomeroy_A)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = TORV_A)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{r}
+#ggplot(results, aes(x = Seed_A, fill = Team_A_Win)) + geom_bar(position = "fill") + theme_bw()
+```
+
+```{r}
+#ggplot(results, aes(x = Seed_Diff, fill = Team_A_Win)) + geom_bar(position = "fill") + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = Massey_Diff)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = Pomeroy_Diff)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = Torv_Diff)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = ADJOE_A)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = ADJDE_A)) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = (ADJOE_A - ADJDE_B))) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = (ADJOE_A - ADJOE_B))) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+```{R}
+#ggplot(results, aes(x = Team_A_Win, y = (ADJDE_A - ADJDE_B))) + geom_boxplot() +
+#  geom_jitter(alpha = 0.2) + theme_bw()
+```
+
+#### Basic Logistic Regression Model  
+
+Use ratings to predict team win probability.  
+```{r}
+ model1 = glm(Team_A_Win ~ TORV_A + Seed_Diff + ADJOE_A + ADJOE_B + ADJDE_A + ADJDE_B + `EFG%_A` + `EFG%_B` + ORB_A + ORB_B + TOR_A + TOR_B + FTR_A + FTR_B, results, family = "binomial")
+ summary(model1)
+```
+
+```{r}
+# model2 = glm(Team_A_Win ~ ADJOE_A + ADJOE_B + 
+#                ADJDE_A + ADJDE_B, results, family = "binomial")
+# summary(model2)
+```
+
+#### Lasso Regression
+
+Set-up folds (can be used for other model types also)
+```{r}
+set.seed(5144)
+folds = group_vfold_cv(results, group = "Season")
+```
+
+```{r}
+#use_glmnet(Team_A_Win ~ Massey_A + Massey_B + Pomeroy_A + Pomeroy_B + 
+#             TORV_A + TORV_B + ADJOE_A + ADJOE_B + ADJDE_A + ADJDE_B, data = results)
+```
+
+For stacking
+```{r}
+ctrl_grid = control_stack_grid() #necessary for working with the stacks package
+ctrl_res = control_stack_resamples() #necessary for working with the stacks package
+```
+
+```{r}
+glmnet_recipe <- 
+  recipe(formula = Team_A_Win ~ TORV_A + TORV_B + Seed_Diff + ADJOE_A + ADJOE_B + ADJDE_A + ADJDE_B + `EFG%_A` + `EFG%_B` + ORB_A + ORB_B + TOR_A + TOR_B + FTR_A + FTR_B, data = results) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_predictors(), -all_nominal()) 
+
+glmnet_spec <- 
+  logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet") 
+
+glmnet_workflow <- 
+  workflow() %>% 
+  add_recipe(glmnet_recipe) %>% 
+  add_model(glmnet_spec) 
+
+glmnet_grid = grid_regular(penalty(), levels = 100)
+#glmnet_grid <- tidyr::crossing(penalty = 10^seq(-6, -1), length.out = 100) 
+#glmnet_grid = 100
+
+glmnet_tune <- 
+  tune_grid(glmnet_workflow, resamples = folds, grid = glmnet_grid, metrics = metric_set(mn_log_loss), control = ctrl_grid)
+```
+
+```{r}
+glmnet_tune %>%
+  collect_metrics() %>%
+  ggplot(aes(penalty, mean)) +
+  geom_errorbar(aes(
+    ymin = mean - std_err,
+    ymax = mean + std_err
+  ),
+  alpha = 0.5
+  ) +
+  geom_line(size = 1.5) +
+  theme(legend.position = "none")
+
+# glmnet_tune %>%
+#   collect_metrics() %>%
+#   filter(.metric == "mn_log_loss") %>%
+#   select(mean, penalty, mixture) %>%
+#   pivot_longer(c(penalty, mixture),
+#                values_to = "value",
+#                names_to = "parameter"
+#   ) %>%
+#   ggplot(aes(value, mean, color = parameter)) +
+#   geom_point(alpha = 0.8, show.legend = FALSE) +
+#   facet_wrap(~parameter, scales = "free_x") +
+#   labs(x = NULL, y = "Log Loss")
+```
+
+What is the exact best value?  
+```{r}
+best_mnlog = glmnet_tune %>%
+  select_best("mn_log_loss")
+best_mnlog
+```
+
+```{r}
+final_lasso = glmnet_workflow %>% finalize_workflow(best_mnlog)
+```
+
+```{r}
+lasso_fit = fit(final_lasso, results)
+```
+
+```{r}
+options(scipen = 999)
+lasso_fit %>%
+  extract_fit_parsnip() %>%
+  pluck("fit")  %>% 
+  coef(s = best_mnlog$penalty) #show the coefficients for our selected lambda value
+options(scipen = 0)
+```
+```{r}
+tidy(lasso_fit)
+```
+
+
+#### XGBoost Model
+```{r}
+#use_xgboost(Team_A_Win ~ Massey_A + Massey_B + Pomeroy_A + Pomeroy_B + 
+#             TORV_A + TORV_B + ADJOE_A + ADJOE_B + ADJDE_A + ADJDE_B, data = results)
+```
+
+Build the XGB model. Using racing to select hyperparameter values.  
+```{r}
+xgboost_recipe <- 
+  recipe(formula = Team_A_Win ~ TORV_A + Seed_Diff + ADJOE_A + ADJOE_B + ADJDE_A + ADJDE_B + `EFG%_A` + `EFG%_B` + ORB_A + ORB_B + TOR_A + TOR_B + FTR_A + FTR_B, data = results) %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  step_zv(all_predictors()) 
+
+xgboost_spec <- 
+  boost_tree(mtry = tune(), 
+              trees = 2000, 
+              min_n = tune(), 
+              tree_depth = tune(), 
+              learn_rate = tune(), 
+              loss_reduction = tune(), 
+              sample_size = tune(), 
+              stop_iter = 100) %>% 
+  set_mode("classification") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+
+set.seed(345)
+xgb_grid = grid_latin_hypercube(
+  finalize(mtry(), results),
+  min_n(),
+  tree_depth(),
+  learn_rate(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  size = 100
+)
+
+xgb_res <- tune_grid(
+    xgboost_workflow,
+    resamples = folds,
+    grid = xgb_grid,
+    metrics = metric_set(mn_log_loss),
+    control = ctrl_grid
+  )
+
+# xgb_tune <- tune_race_anova(
+#   xgboost_workflow,
+#   resamples = folds,
+#   grid = xgb_grid,
+#   metrics = metric_set(mn_log_loss),
+#   control = ctrl_grid
+# )
+
+```
+
+Show results of race selection of hyperparameters
+```{r}
+#plot_race(xgb_tune)
+```
+
+```{r}
+xgb_res %>%
+  collect_metrics() %>%
+  filter(.metric == "mn_log_loss") %>%
+  dplyr::select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "Log Loss") +
+  theme_minimal()
+```
+
+```{r}
+best_xgb = select_best(xgb_res, "mn_log_loss")
+
+final_xgb = finalize_workflow(
+  xgboost_workflow,
+  best_xgb
+)
+
+final_xgb
+```
+
+```{r}
+final_xgb_fit = fit(final_xgb, results)
+```
+
+#### VIP and SHAP for XGBoost
+
+Inspired by: https://juliasilge.com/blog/board-games/
+
+```{r}
+xgb_fit <- extract_fit_parsnip(final_xgb_fit)
+vip(xgb_fit, geom = "point", num_features = 8)
+```
+
+```{r}
+tourney_prep = prep(xgboost_recipe)
+
+tourney_shap <-
+  shap.prep(
+    xgb_model = extract_fit_engine(xgb_fit),
+    X_train = bake(tourney_prep,
+      has_role("predictor"),
+      new_data = NULL,
+      composition = "matrix"
+    )
+  )
+
+shap.plot.summary(tourney_shap)
+```
+```{r}
+shap.plot.dependence(
+  tourney_shap,
+  x = "Seed_Diff",
+  color_feature = "ADJDE_B",
+  size0 = 1.2,
+  smooth = FALSE, add_hist = TRUE
+)
+```
+
+
+#### Ensemble
+
+Stacking
+```{r}
+ncaa_stacks = stacks() %>%
+  add_candidates(glmnet_tune) %>%
+  add_candidates(xgb_res)
+```
+
+Blend the predictions by fitting a Lasso model to the stack. Each model in the stack receives a coefficient value (can be zero as this is Lasso).  
+```{r}
+ncaa_blend = 
+  ncaa_stacks %>% 
+  blend_predictions(metric = metric_set(mn_log_loss)) #fits a Lasso model to the stack  
+  #setting the metric in the above line is extremely important!!
+```
+
+Look at results
+```{r}
+autoplot(ncaa_blend, type = "weights")
+```
+
+Fit the stack to training data
+```{r}
+#Fit the stack on the training set
+ncaa_blend <-
+  ncaa_blend %>%
+  fit_members()
+```
+
+Predictions  
+```{r}
+preds = predict(ncaa_blend, results, type = "prob")[2]
+```
+
+```{r}
+head(preds)
+```
+
+#### Kaggle Submits
+
+Load sample submission for reference. Is all possible matchups from 2016, 2017, 2018, 2019 and 2021.   
+```{r, include=FALSE}
+#Read-in sample file
+sample_submit = read_csv("MSampleSubmissionStage2.csv")
+
+#Extract game IDs and delete pre-populated predictions
+submits = sample_submit %>% separate(ID,
+                into = c("Season", "Team_A_ID", "Team_B_ID"), 
+                remove = FALSE, sep = "_") %>% select(-Pred)
+
+#Create Season Team IDs in dataset  
+submits = submits %>% unite("Season_Team_A_ID", c("Season", "Team_A_ID"), remove = FALSE)
+submits = submits %>% unite("Season_Team_B_ID", c("Season", "Team_B_ID"), remove = FALSE)
+
+#Lookup predictor variable values for teams in submissions dataset
+submits = left_join(submits, torvik, by = c("Season_Team_A_ID" = "Season_TeamID"))
+submits = left_join(submits, torvik, by = c("Season_Team_B_ID" = "Season_TeamID"))
+submits = left_join(submits, seeds, by = c("Season_Team_A_ID" = "Season_TeamID"))
+submits = left_join(submits, seeds, by = c("Season_Team_B_ID" = "Season_TeamID"))
+
+#set-up variables
+submits = submits %>% rename(TORV_A = TORV.x, TORV_B = TORV.y, ADJOE_A = ADJOE.x, ADJOE_B = ADJOE.y, ADJDE_A = ADJDE.x, ADJDE_B = ADJDE.y, Seed_A = Seed.x, Seed_B = Seed.y) %>% 
+    rename(`EFG%_A` = `EFG%.x`, `EFG%_B` = `EFG%.y`, ORB_A = ORB.x, ORB_B = ORB.y,
+           TOR_A = TOR.x, TOR_B = TOR.y, FTR_A = FTR.x, FTR_B = FTR.y) %>%
+    mutate(Seed_A = as_factor(Seed_A)) %>% mutate(Seed_B = as_factor(Seed_B)) %>%
+    mutate(Seed_Diff = as.numeric(Seed_A) - as.numeric(Seed_B))
+    
+```
+
+Make predictions  
+```{r}
+#basic logistic regression
+#preds = predict(model2, submits, type = "response")
+
+#lasso 
+preds = predict(lasso_fit, new_data = results, type = "prob")[2]
+
+#XGB
+#preds = predict(final_xgb_fit, submits, type = "prob")
+#head(preds)
+
+#stack 
+#preds = predict(ncaa_blend, submits, type = "prob")[2]
+```
+
+Check mean log loss
+```{r}
+results %>% mutate(preds = preds$.pred_Yes) %>% mutate(logloss = LogLossBinary(as.numeric(Team_A_Win)-1,preds)) %>% summarise(mean = mean(logloss))
+
+```
+
+
+
+```{r}
+#write out predictions for ease of use
+predictions = submits %>% select(TEAM.x, TEAM.y, Team_A_ID, Team_B_ID, Seed_A, Seed_B) %>%
+  mutate(Pred = preds$.pred_Yes)
+
+write.csv(predictions, "predictions.csv")
+
+#change the Pred term as needed
+#may also need to change the ID value (make sure that it is in the form year_teamID_teamID)
+#modify or delete rename, if needed
+submits = submits %>% select(ID.x) %>% mutate(Pred = preds$.pred_Yes) %>%
+  rename(ID = ID.x)
+```
+
+```{r}
+head(submits)
+```
+
+Write to file  
+```{r}
+write_csv(submits, "submits.csv")
+```
+
